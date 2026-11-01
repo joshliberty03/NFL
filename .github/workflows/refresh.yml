@@ -1,0 +1,68 @@
+name: Refresh data and rebuild site
+
+on:
+  schedule:
+    - cron: '30 10 * * 2,5'      # Tuesday and Friday morning: always do a full refresh
+    - cron: '20 * * * 0,1,4,5,6' # every hour on game days: refresh only if new results are out
+  workflow_dispatch:              # run it by hand any time (always does a full refresh)
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Is there anything new?
+        id: chk
+        run: |
+          R=https://github.com/nflverse/nflverse-data/releases/download
+          curl -sfL "$R/schedules/games.csv" -o /tmp/games.csv
+          FINALS=$(python3 -c "
+          import csv
+          print(sum(1 for r in csv.DictReader(open('/tmp/games.csv')) if r['season']=='2026' and r.get('home_score') not in ('','NA',None)))")
+          LM1=$(curl -sIL "$R/stats_player/stats_player_week_2026.csv" | grep -i '^last-modified' | tail -1 | tr -d '\r')
+          LM2=$(curl -sIL "$R/pbp/play_by_play_2026.csv" | grep -i '^last-modified' | tail -1 | tr -d '\r')
+          NEW="$FINALS|$LM1|$LM2"
+          OLD=$(cat .last_sig 2>/dev/null || echo none)
+          echo "now:  $NEW"; echo "last: $OLD"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "${{ github.event.schedule }}" = "30 10 * * 2,5" ] || [ "$NEW" != "$OLD" ]; then
+            echo "run=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=no" >> "$GITHUB_OUTPUT"; echo "Nothing new, skipping."
+          fi
+          echo "$NEW" > /tmp/new_sig
+
+      - uses: actions/setup-python@v5
+        if: steps.chk.outputs.run == 'yes'
+        with:
+          python-version: '3.12'
+
+      - name: Install tools
+        if: steps.chk.outputs.run == 'yes'
+        run: pip install pandas numpy ephem pillow
+
+      - name: Download fresh data and rebuild
+        if: steps.chk.outputs.run == 'yes'
+        run: |
+          mkdir -p "$HOME/nfl/stats" "$HOME/nfl/games"
+          tar xzf nfl-pipeline.tgz -C "$HOME/nfl"
+          cd "$HOME/nfl/site"
+          bash refresh.sh
+          cp index.html "$GITHUB_WORKSPACE/index.html"
+          cp /tmp/new_sig "$GITHUB_WORKSPACE/.last_sig"
+
+      - name: Publish if anything changed
+        if: steps.chk.outputs.run == 'yes'
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git add index.html .last_sig
+          git diff --cached --quiet || (git commit -m "Refresh data $(date -u +%Y-%m-%d\ %H:%M)" && git push)
