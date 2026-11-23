@@ -3,7 +3,7 @@ name: Refresh data and rebuild site
 on:
   schedule:
     - cron: '30 10 * * 2,5'      # Tuesday and Friday morning: always do a full refresh
-    - cron: '20 * * * 0,1,4,5,6' # every hour on game days: refresh only if new results are out
+    - cron: '20 * * * *'         # every hour, every day: refresh only if new results are out (covers Mon/Wed/Thu/Sat games too)
   workflow_dispatch:              # run it by hand any time (always does a full refresh)
 
 permissions:
